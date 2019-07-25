@@ -1,8 +1,9 @@
 unit libnfs;
+//mostly inspired by this header : https://github.com/sahlberg/libnfs/blob/master/include/nfsc/libnfs.h
 
 interface
 
-uses windows,sysutils,classes;
+uses windows,sysutils,classes,winsock;
 
 const
 O_RDONLY=	$0000;		//* open for reading only */
@@ -141,12 +142,25 @@ var
   //With ftruncate(), the file must be open for writing; with truncate(), the file must be writable.
   nfs_truncate:function(nfs:pointer; path:pchar;length:int64):integer; cdecl;
 
+  //
+  nfs_set_uid:function(nfs:pointer;uid:integer):integer; cdecl;
+  nfs_set_gid:function(nfs:pointer;gid:integer):integer; cdecl;
+  //
+  nfs_rmdir:function(nfs:pointer; path:pchar):integer; cdecl;
+  nfs_mkdir:function(nfs:pointer; path:pchar):integer; cdecl;
+  //
+  nfs_rename:function(nfs:pointer; old_path:pchar;new_path:pchar):integer; cdecl;
+  //
+  nfs_get_readmax:function(nfs:pointer):int64; cdecl;
+  nfs_get_writemax:function(nfs:pointer):int64; cdecl;
+  nfs_set_version:function(nfs:pointer;version:integer):integer; cdecl;
+  //
+  nfs_unlink:function(nfs:pointer; path:pchar):integer; cdecl;
+
 procedure lib_init;
 procedure lib_free;
 function nfsdiscover(items:tstrings):boolean;
-function nfsreadfile2(path,local:string):boolean;
-function nfswritefile2(path,local:string):int64;
-function nfsreadfile3(path:string):boolean;
+
 
 var
 fLibHandle:thandle=thandle(-1);
@@ -163,6 +177,8 @@ FreeLibrary(fLibHandle);
 end;
 
 procedure lib_init;
+var
+wsaData: TWSAData;
 begin
 fLibHandle:=thandle(-1);
 fLibHandle:=LoadLibraryA(PAnsiChar('libnfs.dll'));
@@ -171,6 +187,8 @@ if fLibHandle <=0 then
   raise exception.create('LoadLibraryA failed');
   exit;
   end;
+//
+WSAStartup(MAKEWORD(2,2), wsaData);
 //
 @nfs_init_context:=GetProcAddress(fLibHandle,'nfs_init_context');
 @nfs_parse_url_full:=GetProcAddress(fLibHandle,'nfs_parse_url_full');
@@ -198,6 +216,17 @@ if fLibHandle <=0 then
 @mount_free_export_list:=GetProcAddress(fLibHandle,'mount_free_export_list');
 @nfs_creat:=GetProcAddress(fLibHandle,'nfs_creat');
 @nfs_truncate:=GetProcAddress(fLibHandle,'nfs_truncate');
+@nfs_set_uid:=GetProcAddress(fLibHandle,'nfs_set_uid');
+@nfs_set_gid:=GetProcAddress(fLibHandle,'nfs_set_gid');
+@nfs_rmdir:=GetProcAddress(fLibHandle,'nfs_rmdir');
+@nfs_mkdir:=GetProcAddress(fLibHandle,'nfs_mkdir');
+@nfs_rename:=GetProcAddress(fLibHandle,'nfs_rename');
+@nfs_get_readmax:=GetProcAddress(fLibHandle,'nfs_get_readmax');
+@nfs_get_writemax:=GetProcAddress(fLibHandle,'nfs_get_writemax');
+@nfs_set_version:=GetProcAddress(fLibHandle,'nfs_set_version');
+@nfs_unlink:=GetProcAddress(fLibHandle,'nfs_unlink');
+
+
 
 //
 end;
@@ -228,135 +257,19 @@ srv:=nil;
 srv:=nfs_find_local_servers;
 if srv<>nil then
 begin
+result:=true;
 p1:=srv;
 if p1^.addr<>nil then nfsgetexports(strpas(p1^.addr ),Items );
 while p1^.next<>nil do
-begin
-p1:=p1^.next;
-if p1^.addr<>nil then nfsgetexports(strpas(p1^.addr ),Items );
-end;
+  begin
+  p1:=p1^.next;
+  if p1^.addr<>nil then nfsgetexports(strpas(p1^.addr ),Items );
+  end;
 if srv<>nil then free_nfs_srvr_list(srv);
 end;
 end;
 
-function nfsreadfile2(path,local:string):boolean;
-var
-nfsfh:pointer;
-stat:nfs_stat_64;
-buf:array[0..4096-1] of char;
-count:integer;
-//
-FS: TFileStream;
-filename:string;
-begin
-result:=false;
-if nfs=nil then exit;
-//context-full vs context-free?
-if nfs_open (nfs,pchar(path) ,O_RDONLY ,@nfsfh)<>0  then raise exception.create(strpas( nfs_get_error(nfs)));
-//
-//if nfs_fstat64(nfs,nfsfh,@stat)<>0 then raise exception.create(strpas( nfs_get_error(nfs)));
-//
-fillchar(buf,sizeof(buf),0);
-count := nfs_read(nfs, nfsfh, sizeof(buf), @buf[0]);
-if count<0 then
-  begin
-  nfs_close(nfs, nfsfh);
-  raise exception.create(strpas( nfs_get_error(nfs)));
-  //exit;
-  end
-  else
-  begin
-  filename:=local;
-  FS := TFileStream.Create(filename, fmOpenReadWrite or fmcreate);
-  FS.Write(buf[0], count);
-  while count>0 do
-  begin
-  fillchar(buf,sizeof(buf),0);
-  count := nfs_read(nfs, nfsfh, sizeof(buf), @buf[0]);
-  if count>0 then FS.Write(buf[0], count);
-  end;
-  FS.Free;
-  result:=true;
-  end;//if count<0 then
 
-//
-if nfs_close(nfs, nfsfh)<>0 then ;//raise exception.create(strpas( nfs_get_error(nfs)));
-end;
-
-function nfsreadfile3(path:string):boolean;
-var
-nfsfh:pointer;
-stat:nfs_stat_64;
-buf:array[0..4096-1] of char;
-count:integer;
-//
-FS: TFileStream;
-begin
-result:=false;
-if nfs=nil then exit;
-//context-full vs context-free?
-if nfs_open (nfs,pchar(path) ,O_RDONLY ,@nfsfh)<>0  then raise exception.create(strpas( nfs_get_error(nfs)));
-//
-//if nfs_fstat64(nfs,nfsfh,@stat)<>0 then raise exception.create(strpas( nfs_get_error(nfs)));
-//
-fillchar(buf,sizeof(buf),0);
-count := nfs_read(nfs, nfsfh, sizeof(buf), @buf[0]);
-if count<0 then
-  begin
-  nfs_close(nfs, nfsfh);
-  raise exception.create(strpas( nfs_get_error(nfs)));
-  end
-  else
-  begin
-  {$i-}write(buf);{$i+}
-  while count>0 do
-  begin
-  fillchar(buf,sizeof(buf),0);
-  count := nfs_read(nfs, nfsfh, sizeof(buf), @buf[0]);
-  if count>0 then {$i-}write(buf);{$i+}
-  end;
-  result:=true;
-  end;//if count<0 then
-
-//
-if nfs_close(nfs, nfsfh)<>0 then ;//raise exception.create(strpas( nfs_get_error(nfs)));
-end;
-
-function nfswritefile2(path,local:string):int64;
-var
-nfsfh:pointer;
-stat:nfs_stat_64;
-buf:array[0..4096-1] of char;
-count:integer;
-//
-FS: TFileStream;
-filename:string;
-begin
-result:=0;
-if nfs=nil then exit;
-//context-full vs context-free
-if nfs_creat(nfs,pchar(path),O_CREAT or O_RDWR,@nfsfh)<>0 then raise exception.create(strpas( nfs_get_error(nfs)));
-//
-  filename:=local;
-  FS := TFileStream.Create(filename, fmOpenRead);
-  while fs.Position < fs.Size do
-  begin
-  count:=FS.read(buf[0], 4096);
-  if nfs_write(nfs, nfsfh, count, @buf[0])<>count  then
-    begin
-    nfs_close(nfs, nfsfh);
-    raise exception.create('nfs_write error');
-    //break;
-    end;
-  end;
-  FS.Free;
-//
-if nfs_fstat64(nfs,nfsfh,@stat)<>0
-  then //showmessage(strpas( nfs_get_error(nfs)));
-  else result:=stat.nfs_size ;
-//
-if nfs_close(nfs, nfsfh)<>0 then ; //raise exception.create(strpas( nfs_get_error(nfs)));
-end;
 
 end.
 
